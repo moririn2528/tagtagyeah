@@ -12,9 +12,9 @@ import (
 )
 
 type Unit struct {
-	Name   string `json:"name"`
-	Url    string `json:"url"`
-	TagIds []*Tag `json:"tag_ids"`
+	Name string `json:"name"`
+	Url  string `json:"url"`
+	Tags []*Tag `json:"tags"`
 }
 
 type Tag struct {
@@ -86,6 +86,42 @@ func changeTag(c echo.Context) error {
 	return c.NoContent(http.StatusOK)
 }
 
+//Get /tag
+func getTag(c echo.Context) error {
+	var userId int64
+	var err error
+	userId, err = strconv.ParseInt(c.QueryParam("user_id"), 10, 64)
+	if err != nil {
+		return c.String(http.StatusBadRequest, "Error: Value user id")
+	}
+	phrase := c.QueryParam("search_phrase")
+
+	rows, err := db.Query("SELECT id, user_id, name from tag_table WHERE user_id = ?", userId)
+	if err != nil {
+		log.Printf("Error: getTag, SELECT, %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	defer rows.Close()
+
+	var res []*Tag
+
+	for rows.Next() {
+		var id int64
+		var name string
+		rows.Scan(&id, &userId, &name)
+		if strings.HasPrefix(name, phrase) {
+			tag := Tag{
+				Id:     id,
+				UserId: userId,
+				Name:   name,
+			}
+			res = append(res, &tag)
+		}
+	}
+
+	return c.JSON(http.StatusOK, res)
+}
+
 //POST /unit
 func createUnit(c echo.Context) error {
 	return nil
@@ -109,6 +145,7 @@ func main() {
 	defer db.Close()
 
 	e.GET("/", testPage)
+	e.GET("/tag", getTag)
 	e.POST("/tag", createTag)
 	e.POST("/tag/:id", changeTag)
 	e.POST("/unit", createUnit)
