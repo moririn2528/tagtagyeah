@@ -138,7 +138,7 @@ func main() {
 	e := echo.New()
 
 	var dataSource string
-	if os.Getenv("DATABASE_URL") != "" {
+	if os.Getenv("CLEARDB_DATABASE_URL") != "" {
 		dataSource = "bfd1ce63e0eaa4:feba6ca9@tcp(us-cdbr-east-04.cleardb.com)/heroku_acb493180552729?parseTime=true"
 	} else {
 		dataSource = "user483:Te9SLqyciALe@tcp(127.0.0.1:3306)/tagtagyeah?parseTime=true"
