@@ -138,8 +138,8 @@ func main() {
 	e := echo.New()
 
 	var dataSource string
-	if os.Getenv("CLEARDB_DATABASE_URL") != "" {
-		dataSource = "bfd1ce63e0eaa4:feba6ca9@tcp(us-cdbr-east-04.cleardb.com)/heroku_acb493180552729?parseTime=true"
+	if os.Getenv("JAWSDB_GOLD_URL") != "" {
+		dataSource = "sl18tzgbp14cglnu:cc3cl5f37fcfrd21@tcp(s465z7sj4pwhp7fn.cbetxkdyhwsb.us-east-1.rds.amazonaws.com:3306)/eij8pzwnprvffh1t?parseTime=true"
 	} else {
 		dataSource = "user483:Te9SLqyciALe@tcp(127.0.0.1:3306)/tagtagyeah?parseTime=true"
 	}
