@@ -1,0 +1,11 @@
+# Compiled Object Files, Static and Dynamic libs(Shared Objects)
+*.o
+*.a
+*.so
+
+# Folders
+bin/*
+vendor/*
+
+# manifestファイルは共有する
+!/vendor/manifest
