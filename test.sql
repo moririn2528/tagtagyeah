@@ -1,4 +1,5 @@
-use tagtagyeah;
+use tagtagyeah; -- local
+use heroku_acb493180552729; -- heroku
 drop table tag_table;
 create table tag_table(
 	id int auto_increment not null primary key,

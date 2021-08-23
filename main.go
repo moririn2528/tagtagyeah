@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -133,10 +134,16 @@ func testPage(c echo.Context) error {
 }
 
 func main() {
+	var err error
 	e := echo.New()
 
-	var err error
-	db, err = sql.Open("mysql", "user483:Te9SLqyciALe@tcp(127.0.0.1:3306)/tagtagyeah")
+	var dataSource string
+	if os.Getenv("DATABASE_URL") != "" {
+		dataSource = "bfd1ce63e0eaa4:feba6ca9@tcp(us-cdbr-east-04.cleardb.com)/heroku_acb493180552729?parseTime=true"
+	} else {
+		dataSource = "user483:Te9SLqyciALe@tcp(127.0.0.1:3306)/tagtagyeah?parseTime=true"
+	}
+	db, err = sql.Open("mysql", dataSource)
 	if err != nil {
 		log.Fatal("failed to open database")
 		return
@@ -149,5 +156,11 @@ func main() {
 	e.POST("/tag", createTag)
 	e.POST("/tag/:id", changeTag)
 	e.POST("/unit", createUnit)
-	e.Logger.Fatal(e.Start(":1323"))
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "1213"
+	}
+
+	e.Logger.Fatal(e.Start(":" + port))
 }
