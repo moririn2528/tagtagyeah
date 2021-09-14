@@ -9,6 +9,14 @@ create table tag_table(
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
+create table user_table(
+	id int not null primary key,
+    name varchar(20) not null,
+    password varchar(100) not null,
+    email varchar(100) not null,
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
 insert into tag_table (user_id,name) values (0,"tag_testW");
 select * from tag_table;
 delete from tag_table where user_id = 0;

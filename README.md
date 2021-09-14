@@ -1,6 +1,8 @@
 # tagtagyeah
 文献にタグをつけ、検索する web アプリを作る
 
+https://tagtagyeah.herokuapp.com/
+
 # API
 
 ## POST /tag
@@ -25,7 +27,7 @@ user_id, name が同じ場合、追加で登録されないが成功となる。
 
 ### パラメータ
 - user_id: ユーザー ID、int64 型
-- search_phrase
+- search_phrase: 検索文字列、prefix が完全一致となるタグを返す
 
 # JSON
 ## Tag
