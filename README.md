@@ -3,6 +3,14 @@
 
 https://tagtagyeah.herokuapp.com/
 
+# history
+### ver a
+jwt 認証をつけようとした
+バージョンを下げないと echo と jwt の相性が悪く使えない。試行錯誤したがバージョンを下げる以外の方法は難しそうだった。
+そもそも認証をつけるのは少し大げさであるため、外した
+
+
+
 # API
 
 ## POST /tag
