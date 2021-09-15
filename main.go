@@ -1,30 +1,28 @@
 package main
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"log"
 	"math"
-	"math/big"
+	mrand "math/rand"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/dgrijalva/jwt-go/v4"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
 )
 
 type Unit struct {
+	Id   int64  `json:"id"`
 	Name string `json:"name"`
 	Url  string `json:"url"`
-	Tags []*Tag `json:"tags"`
+	Tags []Tag  `json:"tags"`
 }
 
 type Tag struct {
@@ -34,35 +32,116 @@ type Tag struct {
 }
 
 type User struct {
-	Id    int64
-	Name  string
-	Email string
+	Id           int64     `db:"id"`
+	Uuid         string    `db:"uuid"`
+	Name         string    `db:"name"`
+	Email        string    `db:"email"`
+	ExpireUuidAt time.Time `db:"expire_uuid_at"`
 }
 
 const (
-	MAX_TAG_NAME_SIZE  = 50
-	MAX_USER_ID        = math.MaxInt32
-	MAX_USER_NAME_SIZE = 20
-	MAX_PASSWORD_SIZE  = 100
-	MAX_EMAIL_SIZE     = 100
-	JWT_SECRET_CODE    = "gHqpK9FVpgxumCAHzZdRTMz52KhxpfVqZyaf"
+	MAX_TAG_NAME_SIZE    = 50
+	MAX_USER_NAME_SIZE   = 20
+	MAX_PASSWORD_SIZE    = 100
+	MAX_EMAIL_SIZE       = 100
+	JWT_SECRET_CODE      = "gHqpK9FVpgxumCAHzZdRTMz52KhxpfVqZyaf"
+	ENABLE_CHAR          = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	UUID_SIZE            = 20
+	MAX_UNIT_NAME_SIZE   = 100
+	MAX_UNIT_URL_SIZE    = 200
+	MAX_TAGS_SIZE        = 100
+	MAX_TAGS_STRING_SIZE = 1000
+	MAX_SQL_EXEC_SIZE    = 1500
 )
 
 var (
 	db *sqlx.DB
 )
 
+func checkStringNull(str string) bool {
+	if strings.ContainsAny(str, ";'\"#*") || strings.Contains(str, "--") {
+		return false
+	}
+	return true
+}
+
 func checkString(str string) bool {
 	if len(str) == 0 {
 		return false
 	}
-	return !strings.ContainsAny(str, ";'\"")
+	return checkStringNull(str)
+}
+
+func getRandString(length int) string {
+	s := make([]byte, length)
+	for i := 0; i < length; i++ {
+		s[i] = ENABLE_CHAR[mrand.Intn(len(ENABLE_CHAR))]
+	}
+	return string(s)
 }
 
 func getHashPassword(username string, password string) string {
 	str := password + "RqJ2iWQHN5Uk" + username
 	hash_str := sha256.Sum256([]byte(str))
 	return hex.EncodeToString(hash_str[:])
+}
+
+func checkUuid(u User) bool {
+	return len(u.Uuid) == UUID_SIZE && checkString(u.Uuid) && time.Now().Before(u.ExpireUuidAt)
+}
+
+func sqlRepeatInt(fn func(int64) error) (int64, error) {
+	var err error
+	for i := 0; i < 2; i++ {
+		n := mrand.Int63n(math.MaxInt32)
+		err = fn(n)
+		if err == nil {
+			return n, nil
+		}
+	}
+	return 0, err
+}
+func sqlRepeatString(fn func(string) error, length int) (string, error) {
+	var err error
+	for i := 0; i < 2; i++ {
+		str := getRandString(length)
+		err = fn(str)
+		if err == nil {
+			return str, nil
+		}
+	}
+	return "", err
+}
+func sqlRepeatIntString(fn func(int64, string) error, length int) (string, error) {
+	var err error
+	for i := 0; i < 2; i++ {
+		n := mrand.Int63n(math.MaxInt32)
+		str := getRandString(length)
+		err = fn(n, str)
+		if err == nil {
+			return str, nil
+		}
+	}
+	return "", err
+}
+
+func getUser(uuid string) (User, error) {
+	if len(uuid) != UUID_SIZE || !checkString(uuid) {
+		return User{}, errors.New("uuid is wrong")
+	}
+	users := []User{}
+	err := db.Select(&users, "SELECT id, uuid, name, email, expire_uuid_at FROM user_table WHERE uuid = ?", uuid)
+	if err != nil {
+		return User{}, err
+	}
+	if len(users) != 1 {
+		log.Printf("getUser, SELECT, len(users) == %v", len(users))
+		return User{}, errors.New("match error")
+	}
+	if !checkUuid(users[0]) {
+		return User{}, errors.New("checkUuid")
+	}
+	return users[0], nil
 }
 
 func register(c echo.Context) error {
@@ -72,7 +151,6 @@ func register(c echo.Context) error {
 	log.Printf("username: %v", username)
 	log.Printf("password: %v", password)
 	log.Printf("email: %v", email)
-	var userId int64
 
 	if len(username) > MAX_USER_NAME_SIZE || !checkString(username) {
 		return c.String(http.StatusBadRequest, "Error: Value username")
@@ -85,13 +163,9 @@ func register(c echo.Context) error {
 	}
 	password_hash := getHashPassword(username, password)
 
-	type GetUser struct {
-		Id       int64  `db:"id"`
-		Username string `db:"name"`
-		Email    string `db:"email"`
-	}
-	users := []GetUser{}
-	err := db.Select(&users, "SELECT id, name, email FROM user_table")
+	users := []User{}
+	err := db.Select(&users, "SELECT id, uuid, name, email, expire_uuid_at FROM user_table WHERE name = ? UNION "+
+		"SELECT id, uuid, name, email, expire_uuid_at FROM user_table WHERE email = ?", username, email)
 	if err != nil {
 		log.Printf("Error: register, SELECT , %v", err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -101,31 +175,17 @@ func register(c echo.Context) error {
 		if user.Email == email {
 			return c.String(http.StatusBadRequest, "Error: email is used")
 		}
-		if user.Username == username {
+		if user.Name == username {
 			return c.String(http.StatusBadRequest, "Error: username is used")
 		}
 	}
-	usedFlag := true
-	for usedFlag {
-		usedFlag = false
-		id, err := rand.Int(rand.Reader, big.NewInt(MAX_USER_ID))
-		if err != nil {
-			log.Printf("Error: register, rand.Int , %v", err)
-			return c.NoContent(http.StatusInternalServerError)
-		}
-		if !id.IsInt64() {
-			log.Println("Error: register, id.IsInt64")
-			return c.NoContent(http.StatusInternalServerError)
-		}
-		userId = id.Int64()
-		for _, user := range users {
-			if user.Id == userId {
-				usedFlag = true
-			}
-		}
-	}
 
-	_, err = db.Exec("INSERT INTO user_table (id, name, password, email) VALUES (?,?,?,?)", userId, username, password_hash, email)
+	_, err = sqlRepeatIntString(func(id int64, str string) error {
+		_, err := db.Exec("INSERT INTO user_table (id, uuid, name, password, email, expire_uuid_at) VALUES (?,?,?,?,?,DATE_ADD(NOW(), INTERVAL 1 DAY))",
+			id, str, username, password_hash, email)
+		return err
+	}, UUID_SIZE)
+
 	if err != nil {
 		log.Printf("Error: register, INSERT , %v", err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -145,13 +205,9 @@ func login(c echo.Context) error {
 	}
 	password_hash := getHashPassword(username, password)
 
-	type UserInfo struct {
-		Id    int64  `db:"id"`
-		Email string `db:"email"`
-	}
-	users := []UserInfo{}
+	users := []User{}
 
-	err := db.Select(&users, "SELECT id, email FROM user_table WHERE name = ? AND password = ?", username, password_hash)
+	err := db.Select(&users, "SELECT id, uuid, name, email, expire_uuid_at FROM user_table WHERE name = ? AND password = ?", username, password_hash)
 	if err != nil {
 		log.Printf("Error: login, SELECT COUNT, %v", err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -163,67 +219,21 @@ func login(c echo.Context) error {
 	if len(users) == 0 {
 		return c.String(http.StatusUnauthorized, "no match")
 	}
-	userId := users[0].Id
-	email := users[0].Email
-
-	token_gen := jwt.New(jwt.SigningMethodHS256)
-
-	claims := token_gen.Claims.(jwt.MapClaims)
-	claims["jti"] = strconv.FormatInt(userId, 10)
-	claims["name"] = username
-	claims["password"] = password
-	claims["email"] = email
-	claims["exp"] = time.Now().Add(time.Hour * 24).Unix()
-
-	token, err := token_gen.SignedString([]byte(JWT_SECRET_CODE))
-	if err != nil {
-		log.Printf("Error: login, token_gen.SignedString, %v", err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
 
 	return c.JSON(http.StatusOK, map[string]string{
-		"token": token,
+		"uuid": users[0].Uuid,
 	})
-}
-
-func getUserInfo(c echo.Context) (User, error) {
-	var user User
-	//tokenStr := c.Response().Header().Get("token")
-	//TODO change
-	tokenStr := c.QueryParam("token")
-	if tokenStr == "" {
-		tokenStr = c.FormValue("token")
-	}
-	if tokenStr == "" {
-		log.Println("not have token")
-		return user, errors.New("not have token")
-	}
-	token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
-		return []byte(JWT_SECRET_CODE), nil
-	})
-	if err != nil {
-		log.Printf("Error: getUserInfo, jwt.Parse(token, %v", err)
-		return user, err
-	}
-
-	claims := token.Claims.(jwt.MapClaims)
-	user.Id, err = strconv.ParseInt(claims["jti"].(string), 10, 64)
-	user.Name = claims["name"].(string)
-	user.Email = claims["email"].(string)
-	if err != nil {
-		log.Printf("Error: getUserInfo, ParseInt jti, %v", err)
-		return user, err
-	}
-	return user, nil
 }
 
 //POST /tag
 func createTag(c echo.Context) error {
 	var tag Tag
 	var err error
-	user, err := getUserInfo(c)
+	var user User
+	uuid := c.FormValue("uuid")
+	user, err = getUser(uuid)
 	if err != nil {
-		log.Printf("Error: createTag, getUserInfo, %v", err)
+		log.Printf("Error: createTag, getUser, %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 	tag.UserId = user.Id
@@ -235,9 +245,13 @@ func createTag(c echo.Context) error {
 	if db == nil {
 		log.Println("database null")
 	}
-	_, err = db.Exec("INSERT INTO tag_table (user_id,name) SELECT ?,? "+
-		"WHERE NOT EXISTS(SELECT id FROM tag_table WHERE user_id = ? AND name = ?)",
-		tag.UserId, tag.Name, tag.UserId, tag.Name)
+
+	_, err = sqlRepeatInt(func(x int64) error {
+		_, err = db.Exec("INSERT INTO tag_table (id,user_id,name) SELECT ?,?,? "+
+			"WHERE NOT EXISTS(SELECT id FROM tag_table WHERE user_id = ? AND name = ?)",
+			x, tag.UserId, tag.Name, tag.UserId, tag.Name)
+		return err
+	})
 
 	if err != nil {
 		log.Printf("Error: createTag, INSERT, %v", err)
@@ -249,7 +263,8 @@ func createTag(c echo.Context) error {
 
 //POST /tag/:id
 func changeTag(c echo.Context) error {
-	user, err := getUserInfo(c)
+	uuid := c.FormValue("uuid")
+	user, err := getUser(uuid)
 	if err != nil {
 		log.Printf("Error: changeTag, getUserInfo, %v", err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -275,7 +290,8 @@ func changeTag(c echo.Context) error {
 //Get /tag
 func getTag(c echo.Context) error {
 	var err error
-	user, err := getUserInfo(c)
+	uuid := c.QueryParam("uuid")
+	user, err := getUser(uuid)
 	if err != nil {
 		log.Printf("Error: getTag, getUserInfo, %v", err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -316,7 +332,137 @@ func getTag(c echo.Context) error {
 
 //POST /unit
 func createUnit(c echo.Context) error {
-	return nil
+	name := c.FormValue("name")
+	url := c.FormValue("url")
+	tag_str := c.FormValue("tags")
+	uuid := c.FormValue("uuid")
+	tag_str_list := strings.Split(tag_str, ",")
+	if len(name) > MAX_UNIT_NAME_SIZE || !checkStringNull(name) {
+		log.Println("Error: Value name")
+		return c.String(http.StatusBadRequest, "Error: Value name")
+	}
+	if len(url) > MAX_UNIT_URL_SIZE || !checkStringNull(url) {
+		log.Println("Error: Value name")
+		return c.String(http.StatusBadRequest, "Error: Value name")
+	}
+	user, err := getUser(uuid)
+	if err != nil {
+		log.Printf("Error: createUnit, getUser, %v", err)
+		return c.String(http.StatusBadRequest, "Error: Value uuid")
+	}
+
+	unit_id, err := sqlRepeatInt(func(id int64) error {
+		_, err := db.Exec("INSERT INTO unit_table(id, user_id, name, url) VALUES (?,?,?,?)",
+			id, user.Id, name, url)
+		return err
+	})
+
+	if err != nil {
+		log.Printf("Error: createUnit, INSERT, %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+
+	if len(tag_str_list) > MAX_TAGS_SIZE {
+		log.Println("Error: tags size is too large")
+		return c.String(http.StatusBadRequest, "Error: tags size is too large")
+	}
+
+	exec_byte := make([]byte, 0, MAX_SQL_EXEC_SIZE)
+	exec_byte = append(exec_byte, "INSERT IGNORE INTO unit_tag(unit_id, tag_id) VALUES "...)
+
+	for i, t := range tag_str_list {
+		tag, err := strconv.ParseInt(strings.Trim(t, " "), 10, 64)
+		if err != nil {
+			log.Println("Error: createUnit, Parse")
+			return c.String(http.StatusBadRequest, "Error: Value tags")
+		}
+		if i > 0 {
+			exec_byte = append(exec_byte, ", "...)
+		}
+		exec_byte = append(exec_byte, ("(" + strconv.FormatInt(unit_id, 10) + "," + strconv.FormatInt(tag, 10) + ")")...)
+	}
+	if len(tag_str_list) > 0 {
+		_, err = db.Exec(string(exec_byte))
+
+		if err != nil {
+			log.Printf("Error: createUnit, insert unit_tag, %v", err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
+	}
+
+	return c.NoContent(http.StatusOK)
+}
+
+//GET /unit
+func getUnit(c echo.Context) error {
+	uuid := c.QueryParam("uuid")
+	tags_str := c.QueryParam("tags")
+	user, err := getUser(uuid)
+
+	if err != nil {
+		log.Printf("Error: getUnit, getUser, %v", err)
+		return c.String(http.StatusBadRequest, "Error: Value uuid")
+	}
+
+	tags_list := strings.Split(tags_str, ",")
+	for _, t := range tags_list {
+		_, err = strconv.ParseInt(strings.Trim(t, " "), 10, 64)
+		if err != nil {
+			return c.String(http.StatusBadRequest, "Error: Value tags")
+		}
+	}
+
+	rows, err := db.Query("SELECT t1.unit_id,unit_table.name,unit_table.url FROM "+
+		"(SELECT unit_id, COUNT(unit_id) as cnt FROM unit_tag WHERE tag_id in (?) "+
+		"GROUP BY unit_id) AS t1 LEFT JOIN unit_table ON t1.cnt = ? AND t1.unit_id = unit_table.id AND unit_table.user_id = ?",
+		tags_str, len(tags_list), user.Id)
+
+	if err != nil {
+		log.Printf("Error: getUnit, SELECT t1.unit_id,unit_table.name, %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+
+	units := []Unit{}
+	unit_id_list := make([]byte, 0, MAX_SQL_EXEC_SIZE)
+	for rows.Next() {
+		var u Unit
+		err = rows.Scan(&u.Id, &u.Name, &u.Url)
+		if err != nil {
+			continue
+		}
+		units = append(units, u)
+		unit_id_list = append(unit_id_list, ","...)
+		unit_id_list = append(unit_id_list, strconv.FormatInt(u.Id, 10)...)
+	}
+	unit_id_str := string(unit_id_list[1:])
+
+	log.Println(unit_id_str)
+	rows, err = db.Query("SELECT t1.unit_id,tag_table.id,tag_table.name FROM "+
+		"(SELECT unit_id, tag_id FROM unit_tag WHERE unit_id in (?)) AS t1 "+
+		"LEFT JOIN tag_table ON t1.tag_id = tag_table.id",
+		unit_id_str)
+
+	if err != nil {
+		log.Printf("Error: getUnit, SELECT t1.unit_id,tag_table.id, %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+
+	for rows.Next() {
+		var t Tag
+		var id int64
+		err = rows.Scan(&id, &t.Id, &t.Name)
+		if err != nil {
+			continue
+		}
+		t.UserId = user.Id
+		for i, u := range units {
+			if u.Id == id {
+				units[i].Tags = append(units[i].Tags, t)
+			}
+		}
+	}
+
+	return c.JSON(http.StatusOK, units)
 }
 
 func testPage(c echo.Context) error {
@@ -327,6 +473,7 @@ func testPage(c echo.Context) error {
 func main() {
 	var err error
 	e := echo.New()
+	mrand.Seed(time.Now().UnixNano())
 
 	var dataSource string
 	if os.Getenv("JAWSDB_GOLD_URL") != "" {
@@ -346,12 +493,11 @@ func main() {
 	e.POST("/login", login)
 	e.POST("/register", register)
 
-	r := e.Group("/restricted")
-	r.Use(middleware.JWT([]byte(JWT_SECRET_CODE)))
-	r.GET("/tag", getTag)
-	r.POST("/tag", createTag)
-	r.POST("/tag/:id", changeTag)
-	r.POST("/unit", createUnit)
+	e.GET("/tag", getTag)
+	e.POST("/tag", createTag)
+	e.POST("/tag/:id", changeTag)
+	e.GET("/unit", getUnit)
+	e.POST("/unit", createUnit)
 
 	port := os.Getenv("PORT")
 	if port == "" {
