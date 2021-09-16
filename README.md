@@ -14,10 +14,18 @@ https://tagtagyeah.herokuapp.com/
 - password: パスワード、100 バイト以下の文字列、ハッシュ済みのものにすること
 - email: メールアドレス、100 バイト以下の文字列、
 
+## GET /auth
+### 説明
+メール認証 (メールに送信されているリンク)
+
+### パラメータ
+- uuid: uuid
+
 ## POST /login
 ### 説明
 ユーザー名、パスワードから、UUID が生成される。
 UUID の有効期限は 1 日。
+メール未認証のときはじかれる。
 
 ### パラメータ
 - username: ユーザー名、20 バイト以下の文字列
@@ -101,9 +109,6 @@ Unit を作成、タグ付け
 - expire_uuid_at: uuid の有効期限
 
 # TODO
-## POST /register
-- メールアドレスの認証をする
-
 ## POST /login
 - username 英数字のみにする
 

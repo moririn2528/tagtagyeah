@@ -38,6 +38,7 @@ type User struct {
 	Name         string    `db:"name"`
 	Email        string    `db:"email"`
 	ExpireUuidAt time.Time `db:"expire_uuid_at"`
+	Auth         []byte    `db:"authorized"`
 }
 
 const (
@@ -122,18 +123,18 @@ func sqlRepeatString(fn func(string) error, length int) (string, error) {
 	log.Println("Warning: sqlRepeatString, SQL repeat finished")
 	return "", err
 }
-func sqlRepeatIntString(fn func(int64, string) error, length int) (string, error) {
+func sqlRepeatIntString(fn func(int64, string) error, length int) (int64, string, error) {
 	var err error
 	for i := 0; i < 2; i++ {
 		n := mrand.Int63n(math.MaxInt32)
 		str := getRandString(length)
 		err = fn(n, str)
 		if err == nil {
-			return str, nil
+			return n, str, nil
 		}
 	}
 	log.Println("Warning: sqlRepeatIntString, SQL repeat finished")
-	return "", err
+	return 0, "", err
 }
 
 func getUser(uuid string) (User, error) {
@@ -162,9 +163,9 @@ func sendMail(to, subject, message string) error {
 	var err error
 	password = os.Getenv("gmailpassword")
 	if password == "" {
-		err = db.Select(&password, "SELECT @gmailpassword")
+		err = db.QueryRow("SELECT gmailpassword FROM secret_table").Scan(&password)
 		if err != nil {
-			log.Printf("Error: sendMail, SELECT @gmai, %v", err)
+			log.Printf("Error: sendMail, rows.Scan, %v", err)
 			return err
 		}
 	}
@@ -188,6 +189,20 @@ func sendMail(to, subject, message string) error {
 	)
 }
 
+func recreateUuid(user *User) error {
+	uuid, err := sqlRepeatString(func(str string) error {
+		_, err := db.Exec("UPDATE user_table SET uuid=?, expire_uuid_at=DATE_ADD(NOW(), INTERVAL ? DAY) WHERE id=?", str, EXPIRE_UUID_LIMIT, user.Id)
+		return err
+	}, UUID_SIZE)
+
+	if err != nil {
+		return err
+	}
+	user.Uuid = uuid
+	user.ExpireUuidAt = time.Now().Add(EXPIRE_UUID_LIMIT * 24 * time.Hour)
+	return nil
+}
+
 func register(c echo.Context) error {
 	username := c.FormValue("username")
 	password := c.FormValue("password")
@@ -208,8 +223,8 @@ func register(c echo.Context) error {
 	password_hash := getHashPassword(username, password)
 
 	users := []User{}
-	err := db.Select(&users, "SELECT id, uuid, name, email, expire_uuid_at FROM user_table WHERE name = ? UNION "+
-		"SELECT id, uuid, name, email, expire_uuid_at FROM user_table WHERE email = ?", username, email)
+	err := db.Select(&users, "SELECT id, uuid, name, email, expire_uuid_at, authorized FROM user_table WHERE name = ? UNION "+
+		"SELECT id, uuid, name, email, expire_uuid_at, authorized FROM user_table WHERE email = ?", username, email)
 	if err != nil {
 		log.Printf("Error: register, SELECT , %v", err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -224,7 +239,7 @@ func register(c echo.Context) error {
 		}
 	}
 
-	_, err = sqlRepeatIntString(func(id int64, str string) error {
+	_, uuid, err := sqlRepeatIntString(func(id int64, str string) error {
 		_, err := db.Exec("INSERT INTO user_table (id, uuid, name, password, email, expire_uuid_at) VALUES (?,?,?,?,?,DATE_ADD(NOW(), INTERVAL ? DAY))",
 			id, str, username, password_hash, email, EXPIRE_UUID_LIMIT)
 		return err
@@ -235,7 +250,63 @@ func register(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
+	message := "以下のリンクからメールアドレスを認証してください。\n" +
+		"localhost:1213/auth?uuid=" + uuid
+	err = sendMail(email, "メール認証", message)
+	if err != nil {
+		log.Printf("Error: register, sendMail , %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+
 	return nil
+}
+
+func checkEmail(c echo.Context) error {
+	uuid := c.QueryParam("uuid")
+	users := []User{}
+	var err error
+
+	err = db.Select(&users, "SELECT id, uuid, name, email, expire_uuid_at, authorized FROM user_table WHERE uuid=?", uuid)
+	if err != nil {
+		log.Printf("Error: checkEmail, SELECT id, uuid, %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	if len(users) == 0 {
+		log.Printf("Error: checkEmail, no match user")
+		return c.NoContent(http.StatusBadRequest)
+	}
+	if len(users) > 1 {
+		log.Printf("Error: checkEmail, many user")
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	user := users[0]
+
+	_, err = db.Exec("UPDATE user_table SET authorized=true WHERE id=?", user.Id)
+	if err != nil {
+		log.Printf("Error: checkEmail, UPDATE %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	err = recreateUuid(&user)
+	if err != nil {
+		log.Printf("Error: checkEmail, recreateUuid, %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+
+	return c.String(http.StatusOK, "OK, "+user.Name+" is Authorized")
+}
+
+func byteToBool(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	if len(b) > 1 {
+		return true
+	}
+	if b[0] == 0 {
+		return false
+	} else {
+		return true
+	}
 }
 
 func login(c echo.Context) error {
@@ -251,7 +322,7 @@ func login(c echo.Context) error {
 
 	users := []User{}
 
-	err := db.Select(&users, "SELECT id, uuid, name, email, expire_uuid_at FROM user_table WHERE name = ? AND password = ?", username, password_hash)
+	err := db.Select(&users, "SELECT id, uuid, name, email, expire_uuid_at, authorized FROM user_table WHERE name = ? AND password = ?", username, password_hash)
 	if err != nil {
 		log.Printf("Error: login, SELECT COUNT, %v", err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -265,6 +336,10 @@ func login(c echo.Context) error {
 	}
 
 	user := users[0]
+	if !byteToBool(user.Auth) {
+		return c.String(http.StatusForbidden, "Please authorize email")
+	}
+
 	err = checkUuid(user)
 
 	if err != nil {
@@ -272,18 +347,11 @@ func login(c echo.Context) error {
 			log.Printf("Error: login, checkUuid, %v", err)
 			return c.NoContent(http.StatusInternalServerError)
 		}
-
-		uuid, err := sqlRepeatString(func(str string) error {
-			_, err := db.Exec("UPDATE user_table SET uuid=?, expire_uuid_at=DATE_ADD(NOW(), INTERVAL ? DAY) WHERE id=?", str, EXPIRE_UUID_LIMIT, user.Id)
-			return err
-		}, UUID_SIZE)
-
+		err = recreateUuid(&user)
 		if err != nil {
-			log.Printf("Error: login, UPDATE user_table SET uuid, %v", err)
+			log.Printf("Error: login, recreateUuid, %v", err)
 			return c.NoContent(http.StatusInternalServerError)
 		}
-		user.Uuid = uuid
-		user.ExpireUuidAt = time.Now().Add(EXPIRE_UUID_LIMIT * 24 * time.Hour)
 	}
 
 	return c.JSON(http.StatusOK, map[string]string{
@@ -573,6 +641,7 @@ func main() {
 	e.GET("/testpage", testPage)
 	e.POST("/login", login)
 	e.POST("/register", register)
+	e.GET("/auth", checkEmail)
 
 	e.GET("/tag", getTag)
 	e.POST("/tag", createTag)

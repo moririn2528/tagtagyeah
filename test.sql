@@ -17,6 +17,7 @@ create table user_table(
     password varchar(100) not null,
     email varchar(100) not null,
     expire_uuid_at DATETIME NOT NULL,
+    authorized BIT(1) NOT NULL DEFAULT false,
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
