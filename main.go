@@ -8,6 +8,7 @@ import (
 	"math"
 	mrand "math/rand"
 	"net/http"
+	"net/smtp"
 	"os"
 	"strconv"
 	"strings"
@@ -52,6 +53,7 @@ const (
 	MAX_TAGS_SIZE        = 100
 	MAX_TAGS_STRING_SIZE = 1000
 	MAX_SQL_EXEC_SIZE    = 1500
+	EXPIRE_UUID_LIMIT    = 1 //days
 )
 
 var (
@@ -86,8 +88,14 @@ func getHashPassword(username string, password string) string {
 	return hex.EncodeToString(hash_str[:])
 }
 
-func checkUuid(u User) bool {
-	return len(u.Uuid) == UUID_SIZE && checkString(u.Uuid) && time.Now().Before(u.ExpireUuidAt)
+func checkUuid(u User) error {
+	if len(u.Uuid) != UUID_SIZE || !checkString(u.Uuid) {
+		return errors.New("uuid is wrong")
+	}
+	if !time.Now().Before(u.ExpireUuidAt) {
+		return errors.New("Forbidden")
+	}
+	return nil
 }
 
 func sqlRepeatInt(fn func(int64) error) (int64, error) {
@@ -99,6 +107,7 @@ func sqlRepeatInt(fn func(int64) error) (int64, error) {
 			return n, nil
 		}
 	}
+	log.Println("Warning: sqlRepeatInt, SQL repeat finished")
 	return 0, err
 }
 func sqlRepeatString(fn func(string) error, length int) (string, error) {
@@ -110,6 +119,7 @@ func sqlRepeatString(fn func(string) error, length int) (string, error) {
 			return str, nil
 		}
 	}
+	log.Println("Warning: sqlRepeatString, SQL repeat finished")
 	return "", err
 }
 func sqlRepeatIntString(fn func(int64, string) error, length int) (string, error) {
@@ -122,6 +132,7 @@ func sqlRepeatIntString(fn func(int64, string) error, length int) (string, error
 			return str, nil
 		}
 	}
+	log.Println("Warning: sqlRepeatIntString, SQL repeat finished")
 	return "", err
 }
 
@@ -138,10 +149,43 @@ func getUser(uuid string) (User, error) {
 		log.Printf("getUser, SELECT, len(users) == %v", len(users))
 		return User{}, errors.New("match error")
 	}
-	if !checkUuid(users[0]) {
-		return User{}, errors.New("checkUuid")
+	err = checkUuid(users[0])
+
+	if err != nil {
+		return User{}, err
 	}
 	return users[0], nil
+}
+
+func sendMail(to, subject, message string) error {
+	var password string
+	var err error
+	password = os.Getenv("gmailpassword")
+	if password == "" {
+		err = db.Select(&password, "SELECT @gmailpassword")
+		if err != nil {
+			log.Printf("Error: sendMail, SELECT @gmai, %v", err)
+			return err
+		}
+	}
+	auth := smtp.PlainAuth(
+		"",
+		"minimohuweb@gmail.com",
+		password,
+		"smtp.gmail.com",
+	)
+
+	return smtp.SendMail(
+		"smtp.gmail.com:587",
+		auth,
+		"minimohuweb@gmail.com",
+		[]string{to},
+		[]byte(
+			"To: "+to+"\r\n"+
+				"Subject:"+subject+"\r\n"+
+				"\r\n"+
+				message),
+	)
 }
 
 func register(c echo.Context) error {
@@ -181,8 +225,8 @@ func register(c echo.Context) error {
 	}
 
 	_, err = sqlRepeatIntString(func(id int64, str string) error {
-		_, err := db.Exec("INSERT INTO user_table (id, uuid, name, password, email, expire_uuid_at) VALUES (?,?,?,?,?,DATE_ADD(NOW(), INTERVAL 1 DAY))",
-			id, str, username, password_hash, email)
+		_, err := db.Exec("INSERT INTO user_table (id, uuid, name, password, email, expire_uuid_at) VALUES (?,?,?,?,?,DATE_ADD(NOW(), INTERVAL ? DAY))",
+			id, str, username, password_hash, email, EXPIRE_UUID_LIMIT)
 		return err
 	}, UUID_SIZE)
 
@@ -220,8 +264,30 @@ func login(c echo.Context) error {
 		return c.String(http.StatusUnauthorized, "no match")
 	}
 
+	user := users[0]
+	err = checkUuid(user)
+
+	if err != nil {
+		if err.Error() != "Forbidden" {
+			log.Printf("Error: login, checkUuid, %v", err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
+
+		uuid, err := sqlRepeatString(func(str string) error {
+			_, err := db.Exec("UPDATE user_table SET uuid=?, expire_uuid_at=DATE_ADD(NOW(), INTERVAL ? DAY) WHERE id=?", str, EXPIRE_UUID_LIMIT, user.Id)
+			return err
+		}, UUID_SIZE)
+
+		if err != nil {
+			log.Printf("Error: login, UPDATE user_table SET uuid, %v", err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
+		user.Uuid = uuid
+		user.ExpireUuidAt = time.Now().Add(EXPIRE_UUID_LIMIT * 24 * time.Hour)
+	}
+
 	return c.JSON(http.StatusOK, map[string]string{
-		"uuid": users[0].Uuid,
+		"uuid": user.Uuid,
 	})
 }
 
@@ -234,6 +300,9 @@ func createTag(c echo.Context) error {
 	user, err = getUser(uuid)
 	if err != nil {
 		log.Printf("Error: createTag, getUser, %v", err)
+		if err.Error() == "Forbidden" {
+			return c.NoContent(http.StatusForbidden)
+		}
 		return c.NoContent(http.StatusInternalServerError)
 	}
 	tag.UserId = user.Id
@@ -267,6 +336,9 @@ func changeTag(c echo.Context) error {
 	user, err := getUser(uuid)
 	if err != nil {
 		log.Printf("Error: changeTag, getUserInfo, %v", err)
+		if err.Error() == "Forbidden" {
+			return c.NoContent(http.StatusForbidden)
+		}
 		return c.NoContent(http.StatusInternalServerError)
 	}
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
@@ -294,6 +366,9 @@ func getTag(c echo.Context) error {
 	user, err := getUser(uuid)
 	if err != nil {
 		log.Printf("Error: getTag, getUserInfo, %v", err)
+		if err.Error() == "Forbidden" {
+			return c.NoContent(http.StatusForbidden)
+		}
 		return c.NoContent(http.StatusInternalServerError)
 	}
 	userId := user.Id
@@ -348,6 +423,9 @@ func createUnit(c echo.Context) error {
 	user, err := getUser(uuid)
 	if err != nil {
 		log.Printf("Error: createUnit, getUser, %v", err)
+		if err.Error() == "Forbidden" {
+			return c.NoContent(http.StatusForbidden)
+		}
 		return c.String(http.StatusBadRequest, "Error: Value uuid")
 	}
 
@@ -401,6 +479,9 @@ func getUnit(c echo.Context) error {
 
 	if err != nil {
 		log.Printf("Error: getUnit, getUser, %v", err)
+		if err.Error() == "Forbidden" {
+			return c.NoContent(http.StatusForbidden)
+		}
 		return c.String(http.StatusBadRequest, "Error: Value uuid")
 	}
 
@@ -479,7 +560,7 @@ func main() {
 	if os.Getenv("JAWSDB_GOLD_URL") != "" {
 		dataSource = "sl18tzgbp14cglnu:cc3cl5f37fcfrd21@tcp(s465z7sj4pwhp7fn.cbetxkdyhwsb.us-east-1.rds.amazonaws.com:3306)/eij8pzwnprvffh1t?parseTime=true"
 	} else {
-		dataSource = "user483:Te9SLqyciALe@tcp(127.0.0.1:3306)/tagtagyeah?parseTime=true"
+		dataSource = "user483:Te9SLqyciALe@tcp(127.0.0.1:3306)/tagtagyeah?parseTime=true&loc=Asia%2FTokyo"
 	}
 	db, err = sqlx.Open("mysql", dataSource)
 	if err != nil {
