@@ -21,6 +21,13 @@ https://tagtagyeah.herokuapp.com/
 ### パラメータ
 - uuid: uuid
 
+## POST /auth
+### 説明
+認証メール送信、ユーザーにつき 1 日 10 通まで送信可能
+
+### パラメータ
+- username: ユーザー名
+
 ## POST /login
 ### 説明
 ユーザー名、パスワードから、UUID が生成される。
@@ -121,3 +128,6 @@ Unit を作成、タグ付け
 
 ## GET /unit
 - tags 空文字でも可能にする
+
+## その他
+ユーザー名、パスワード変更など可能にする

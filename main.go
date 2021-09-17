@@ -55,10 +55,14 @@ const (
 	MAX_TAGS_STRING_SIZE = 1000
 	MAX_SQL_EXEC_SIZE    = 1500
 	EXPIRE_UUID_LIMIT    = 1 //days
+	SENDING_MAIL_LIMIT   = 10
 )
 
 var (
-	db *sqlx.DB
+	db                    *sqlx.DB
+	working_directory     string
+	sending_mail_times    map[int64]int64 = make(map[int64]int64)
+	last_sending_mail_day time.Time       = time.Now()
 )
 
 func checkStringNull(str string) bool {
@@ -158,7 +162,7 @@ func getUser(uuid string) (User, error) {
 	return users[0], nil
 }
 
-func sendMail(to, subject, message string) error {
+func sendEmail(to, subject, message string) error {
 	var password string
 	var err error
 	password = os.Getenv("gmailpassword")
@@ -187,6 +191,27 @@ func sendMail(to, subject, message string) error {
 				"\r\n"+
 				message),
 	)
+}
+
+func sendAuthorizeEmail(to, uuid string, id int64) error {
+	tm := time.Now()
+
+	if tm.Day() != last_sending_mail_day.Day() || tm.Month() != last_sending_mail_day.Month() || tm.Year() != last_sending_mail_day.Year() {
+		sending_mail_times = make(map[int64]int64)
+	}
+	_, ok := sending_mail_times[id]
+	if !ok {
+		sending_mail_times[id] = 0
+	}
+	if sending_mail_times[id] >= SENDING_MAIL_LIMIT {
+		return errors.New("send too many mails in 1 day")
+	}
+	sending_mail_times[id]++
+	last_sending_mail_day = time.Now()
+
+	message := "以下のリンクからメールアドレスを認証してください。\n" +
+		working_directory + "/auth?uuid=" + uuid
+	return sendEmail(to, "メール認証", message)
 }
 
 func recreateUuid(user *User) error {
@@ -239,7 +264,7 @@ func register(c echo.Context) error {
 		}
 	}
 
-	_, uuid, err := sqlRepeatIntString(func(id int64, str string) error {
+	id, uuid, err := sqlRepeatIntString(func(id int64, str string) error {
 		_, err := db.Exec("INSERT INTO user_table (id, uuid, name, password, email, expire_uuid_at) VALUES (?,?,?,?,?,DATE_ADD(NOW(), INTERVAL ? DAY))",
 			id, str, username, password_hash, email, EXPIRE_UUID_LIMIT)
 		return err
@@ -250,9 +275,7 @@ func register(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	message := "以下のリンクからメールアドレスを認証してください。\n" +
-		"localhost:1213/auth?uuid=" + uuid
-	err = sendMail(email, "メール認証", message)
+	err = sendAuthorizeEmail(email, uuid, id)
 	if err != nil {
 		log.Printf("Error: register, sendMail , %v", err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -357,6 +380,43 @@ func login(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]string{
 		"uuid": user.Uuid,
 	})
+}
+
+//POST /auth
+func sendAuthEmailByUsername(c echo.Context) error {
+	username := c.FormValue("username")
+	if !checkString(username) {
+		log.Println("Error: Value username")
+		return c.String(http.StatusBadRequest, "Error: Value username")
+	}
+	users := []User{}
+	err := db.Select(&users, "SELECT id, uuid, name, email, expire_uuid_at, authorized FROM user_table "+
+		"WHERE name = ?", username)
+	if err != nil || len(users) == 0 || len(users) > 1 {
+		log.Printf("Error: sendAuthEmailByUsername, SELECT, %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	user := users[0]
+	err = checkUuid(user)
+	if err != nil {
+		if err.Error() != "Forbidden" {
+			log.Printf("Error: sendAuthEmailByUsername, checkUuid, %v", err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
+		err = recreateUuid(&user)
+		if err != nil {
+			log.Printf("Error: sendAuthEmailByUsername, recreateUuid, %v", err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
+	}
+
+	err = sendAuthorizeEmail(user.Email, user.Uuid, user.Id)
+	if err != nil {
+		log.Printf("Error: sendAuthEmailByUsername, sendAuthorizeEmail, %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+
+	return c.NoContent(http.StatusOK)
 }
 
 //POST /tag
@@ -626,10 +686,17 @@ func main() {
 
 	var dataSource string
 	if os.Getenv("JAWSDB_GOLD_URL") != "" {
-		dataSource = "sl18tzgbp14cglnu:cc3cl5f37fcfrd21@tcp(s465z7sj4pwhp7fn.cbetxkdyhwsb.us-east-1.rds.amazonaws.com:3306)/eij8pzwnprvffh1t?parseTime=true"
+		dataSource = "sl18tzgbp14cglnu:cc3cl5f37fcfrd21@tcp(s465z7sj4pwhp7fn.cbetxkdyhwsb.us-east-1.rds.amazonaws.com:3306)/eij8pzwnprvffh1t?parseTime=true&loc=Asia%2FTokyo"
+		working_directory = "https://tagtagyeah.herokuapp.com"
 	} else {
 		dataSource = "user483:Te9SLqyciALe@tcp(127.0.0.1:3306)/tagtagyeah?parseTime=true&loc=Asia%2FTokyo"
+		working_directory = "localhost:1213"
 	}
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "1213"
+	}
+
 	db, err = sqlx.Open("mysql", dataSource)
 	if err != nil {
 		log.Fatal("failed to open database")
@@ -642,17 +709,13 @@ func main() {
 	e.POST("/login", login)
 	e.POST("/register", register)
 	e.GET("/auth", checkEmail)
+	e.POST("/auth", sendAuthEmailByUsername)
 
 	e.GET("/tag", getTag)
 	e.POST("/tag", createTag)
 	e.POST("/tag/:id", changeTag)
 	e.GET("/unit", getUnit)
 	e.POST("/unit", createUnit)
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "1213"
-	}
 
 	e.Logger.Fatal(e.Start(":" + port))
 }
