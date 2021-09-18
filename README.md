@@ -9,8 +9,7 @@ https://tagtagyeah.herokuapp.com/
 ユーザー名、パスワード、メールアドレスを登録する。
 
 ### パラメータ
-- username: ユーザー名、20 バイト以下の文字列
-  はじいていないが英数字のみにしてほしい
+- username: ユーザー名、20 バイト以下英数字のみの文字列
 - password: パスワード、100 バイト以下の文字列、ハッシュ済みのものにすること
 - email: メールアドレス、100 バイト以下の文字列、
 
@@ -69,6 +68,23 @@ user_id, name が同じ場合、追加で登録されないが成功となる。
 ### 返り値
 - Tag(JSON) の配列
 
+## PUT /tag
+### 説明
+タグの更新
+
+### パラメータ
+- uuid
+- id: タグ id
+- name: タグ名
+
+## DELETE /tag/:id
+### 説明
+タグの削除
+
+### パラメータ
+- id: タグ id
+- uuid (クエリパラメータ)
+
 ## GET /unit
 ### 説明
 Unit を tag から検索
@@ -89,11 +105,58 @@ Unit を作成、タグ付け
 - tags: タグ id をコンマ区切りでつなげた文字列
 - name: 名前、省略可
 - url : URL、省略可
+name, url のうち少なくとも 1 つは付けること
+
+## PUT /unit
+### 説明
+Unit の更新
+
+### パラメータ
+- uuid
+- tags: タグ id をコンマ区切りでつなげた文字列、省略可
+- name: 名前、省略可
+- url : URL、省略可
+tags, name, url のうち少なくとも 1 つは付けること
+
+## DELETE /unit
+### 説明
+Unit の削除
+
+### パラメータ
+- id: Unit id
+- uuid (クエリパラメータ)
+
+
+## GET /user
+### 説明
+ユーザー情報をかえす
+
+## パラメータ
+- uuid
+
+## 返り値
+JSON 型 User
+
+## PUT /user
+### 説明
+ユーザー情報の更新、メールアドレスを更新する際は認証メール送信
+
+## パラメータ
+- uuid
+- username: ユーザー名、省略可
+- password: パスワード、省略可
+- email: メールアドレス、省略可
+username, password, email のうち一つは使うこと
+
+## DELETE /user/:uuid
+### 説明
+ユーザーの削除
 
 ## http ステータス
 - 成功時 200
 - 入力パラメータのエラー 400
-- uuid 有効期限切れ 403
+- uuid 有効期限切れ 403 "uuid is expired"
+- ユーザーが登録していない unit, tag に対する変更 403
 - それ以外のエラー(上ではじけなかった入力エラーや内部エラーなど) 500
 
 # JSON
@@ -115,10 +178,12 @@ Unit を作成、タグ付け
 - email: メールアドレス、文字列
 - expire_uuid_at: uuid の有効期限
 
-# TODO
-## POST /login
-- username 英数字のみにする
+# パラメータ
+- GET: QueryParam
+- PUT, POST: FormValue
+- DELETE: (Param)
 
+# TODO
 ## POST /tag
 - user_id, name が同じ場合、200 以外を返したい。
 
@@ -126,8 +191,5 @@ Unit を作成、タグ付け
 - 毎回 select が実行される、search_phrase だけ変わったとき、早くかえしたい。
 - 前方完全一致になっている、N グラムとかの検索アルゴリズムを入れる
 
-## GET /unit
-- tags 空文字でも可能にする
-
 ## その他
-ユーザー名、パスワード変更など可能にする
+ユーザー名からメール送信でパスワード再設定できるようにする(フロントと相談)

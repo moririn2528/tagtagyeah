@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
@@ -33,12 +34,12 @@ type Tag struct {
 }
 
 type User struct {
-	Id           int64     `db:"id"`
-	Uuid         string    `db:"uuid"`
-	Name         string    `db:"name"`
-	Email        string    `db:"email"`
-	ExpireUuidAt time.Time `db:"expire_uuid_at"`
-	Auth         []byte    `db:"authorized"`
+	Id           int64     `db:"id" json:"id"`
+	Uuid         string    `db:"uuid" json:"uuid"`
+	Name         string    `db:"name" json:"name"`
+	Email        string    `db:"email" json:"email"`
+	ExpireUuidAt time.Time `db:"expire_uuid_at" json:"expire_uuid_at"`
+	Auth         []byte    `db:"authorized" json:"-"`
 }
 
 const (
@@ -71,12 +72,22 @@ func checkStringNull(str string) bool {
 	}
 	return true
 }
-
 func checkString(str string) bool {
 	if len(str) == 0 {
 		return false
 	}
 	return checkStringNull(str)
+}
+func checkStringRestrict(str string) bool { // username, uuid
+	if len(str) == 0 {
+		return false
+	}
+	for _, c := range str {
+		if !unicode.IsLetter(c) && !unicode.IsNumber(c) {
+			return false
+		}
+	}
+	return true
 }
 
 func getRandString(length int) string {
@@ -141,28 +152,38 @@ func sqlRepeatIntString(fn func(int64, string) error, length int) (int64, string
 	return 0, "", err
 }
 
-func getUser(uuid string) (User, error) {
+func getUser(uuid string, c *echo.Context) (User, bool, error) {
 	if len(uuid) != UUID_SIZE || !checkString(uuid) {
-		return User{}, errors.New("uuid is wrong")
+		log.Println("Error: getUser, uuid is wrong")
+		return User{}, false, (*c).String(http.StatusBadRequest, "Error: Value uuid")
 	}
 	users := []User{}
 	err := db.Select(&users, "SELECT id, uuid, name, email, expire_uuid_at FROM user_table WHERE uuid = ?", uuid)
 	if err != nil {
-		return User{}, err
+		log.Printf("Error: getUser, SELECT, %v", err)
+		return User{}, false, (*c).NoContent(http.StatusInternalServerError)
 	}
 	if len(users) != 1 {
 		log.Printf("getUser, SELECT, len(users) == %v", len(users))
-		return User{}, errors.New("match error")
+		return User{}, false, (*c).NoContent(http.StatusInternalServerError)
 	}
+
 	err = checkUuid(users[0])
 
 	if err != nil {
-		return User{}, err
+		if err.Error() == "Forbidden" {
+			return User{}, false, (*c).String(http.StatusForbidden, "uuid is expired")
+		}
+		log.Printf("getUser, checkUuid, %v", err)
+		return User{}, false, (*c).NoContent(http.StatusInternalServerError)
 	}
-	return users[0], nil
+	return users[0], true, nil
 }
 
 func sendEmail(to, subject, message string) error {
+	log.Println("sending mail ...")
+	defer log.Println("sending mail finished")
+
 	var password string
 	var err error
 	password = os.Getenv("gmailpassword")
@@ -193,7 +214,7 @@ func sendEmail(to, subject, message string) error {
 	)
 }
 
-func sendAuthorizeEmail(to, uuid string, id int64) error {
+func sendAuthorizeEmail(to, subject, message, uuid string, id int64) error {
 	tm := time.Now()
 
 	if tm.Day() != last_sending_mail_day.Day() || tm.Month() != last_sending_mail_day.Month() || tm.Year() != last_sending_mail_day.Year() {
@@ -209,9 +230,16 @@ func sendAuthorizeEmail(to, uuid string, id int64) error {
 	sending_mail_times[id]++
 	last_sending_mail_day = time.Now()
 
-	message := "以下のリンクからメールアドレスを認証してください。\n" +
-		working_directory + "/auth?uuid=" + uuid
-	return sendEmail(to, "メール認証", message)
+	if subject == "" {
+		subject = "メール認証"
+	}
+	if message == "" {
+		message = "以下のリンクからメールアドレスを認証してください。\n<url>\n"
+	}
+	message = strings.Replace(message, "<url>", working_directory+"/auth?uuid="+uuid, -1)
+
+	err := sendEmail(to, subject, message)
+	return err
 }
 
 func recreateUuid(user *User) error {
@@ -232,11 +260,8 @@ func register(c echo.Context) error {
 	username := c.FormValue("username")
 	password := c.FormValue("password")
 	email := c.FormValue("email")
-	log.Printf("username: %v", username)
-	log.Printf("password: %v", password)
-	log.Printf("email: %v", email)
 
-	if len(username) > MAX_USER_NAME_SIZE || !checkString(username) {
+	if len(username) > MAX_USER_NAME_SIZE || !checkStringRestrict(username) {
 		return c.String(http.StatusBadRequest, "Error: Value username")
 	}
 	if len(password) > MAX_PASSWORD_SIZE || !checkString(password) {
@@ -275,7 +300,7 @@ func register(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	err = sendAuthorizeEmail(email, uuid, id)
+	err = sendAuthorizeEmail(email, "", "", uuid, id)
 	if err != nil {
 		log.Printf("Error: register, sendMail , %v", err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -385,7 +410,7 @@ func login(c echo.Context) error {
 //POST /auth
 func sendAuthEmailByUsername(c echo.Context) error {
 	username := c.FormValue("username")
-	if !checkString(username) {
+	if !checkStringRestrict(username) {
 		log.Println("Error: Value username")
 		return c.String(http.StatusBadRequest, "Error: Value username")
 	}
@@ -410,7 +435,7 @@ func sendAuthEmailByUsername(c echo.Context) error {
 		}
 	}
 
-	err = sendAuthorizeEmail(user.Email, user.Uuid, user.Id)
+	err = sendAuthorizeEmail(user.Email, "", "", user.Uuid, user.Id)
 	if err != nil {
 		log.Printf("Error: sendAuthEmailByUsername, sendAuthorizeEmail, %v", err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -423,15 +448,10 @@ func sendAuthEmailByUsername(c echo.Context) error {
 func createTag(c echo.Context) error {
 	var tag Tag
 	var err error
-	var user User
 	uuid := c.FormValue("uuid")
-	user, err = getUser(uuid)
-	if err != nil {
-		log.Printf("Error: createTag, getUser, %v", err)
-		if err.Error() == "Forbidden" {
-			return c.NoContent(http.StatusForbidden)
-		}
-		return c.NoContent(http.StatusInternalServerError)
+	user, ok, err := getUser(uuid, &c)
+	if !ok {
+		return err
 	}
 	tag.UserId = user.Id
 	tag.Name = c.FormValue("name")
@@ -458,18 +478,14 @@ func createTag(c echo.Context) error {
 	return c.NoContent(http.StatusOK)
 }
 
-//POST /tag/:id
-func changeTag(c echo.Context) error {
+//PUT /tag
+func updateTag(c echo.Context) error {
 	uuid := c.FormValue("uuid")
-	user, err := getUser(uuid)
-	if err != nil {
-		log.Printf("Error: changeTag, getUserInfo, %v", err)
-		if err.Error() == "Forbidden" {
-			return c.NoContent(http.StatusForbidden)
-		}
-		return c.NoContent(http.StatusInternalServerError)
+	user, ok, err := getUser(uuid, &c)
+	if !ok {
+		return err
 	}
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	id, err := strconv.ParseInt(c.FormValue("id"), 10, 64)
 	if err != nil {
 		return c.String(http.StatusBadRequest, "Error: Value id")
 	}
@@ -478,10 +494,19 @@ func changeTag(c echo.Context) error {
 		return c.String(http.StatusBadRequest, "Error: Value name")
 	}
 
-	_, err = db.Exec("UPDATE tag_table SET name = ? WHERE id = ? AND user_id = ?", name, id, user.Id)
+	s, err := db.Exec("UPDATE tag_table SET name = ? WHERE id = ? AND user_id = ?", name, id, user.Id)
 	if err != nil {
-		log.Printf("Error: changeTag, UPDATE, %v", err)
+		log.Printf("Error: updateTag, UPDATE, %v", err)
 		return c.NoContent(http.StatusInternalServerError)
+	}
+	r, err := s.RowsAffected()
+	if err != nil {
+		log.Printf("Error: updateTag, UPDATE, RowsAffected, %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	if r != 1 {
+		log.Printf("Error: updateTag, Forbidden")
+		return c.NoContent(http.StatusForbidden)
 	}
 
 	return c.NoContent(http.StatusOK)
@@ -491,13 +516,9 @@ func changeTag(c echo.Context) error {
 func getTag(c echo.Context) error {
 	var err error
 	uuid := c.QueryParam("uuid")
-	user, err := getUser(uuid)
-	if err != nil {
-		log.Printf("Error: getTag, getUserInfo, %v", err)
-		if err.Error() == "Forbidden" {
-			return c.NoContent(http.StatusForbidden)
-		}
-		return c.NoContent(http.StatusInternalServerError)
+	user, ok, err := getUser(uuid, &c)
+	if !ok {
+		return err
 	}
 	userId := user.Id
 	phrase := c.QueryParam("search_phrase")
@@ -533,6 +554,41 @@ func getTag(c echo.Context) error {
 	return c.JSON(http.StatusOK, res)
 }
 
+//Delete /tag:id
+func deleteTag(c echo.Context) error {
+	var err error
+	uuid := c.QueryParam("uuid")
+	user, ok, err := getUser(uuid, &c)
+	if !ok {
+		return err
+	}
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		return c.String(http.StatusBadRequest, "Error: Value id")
+	}
+
+	s, err := db.Exec("DELETE FROM tag_table WHERE id = ? AND user_id = ?", id, user.Id)
+	if err != nil {
+		log.Printf("Error: deleteTag, DELETE FROM tag_table, %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	r, err := s.RowsAffected()
+	if err != nil {
+		log.Printf("Error: deleteTag, DELETE FROM tag_table, RowsAffected, %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	if r != 1 {
+		log.Printf("Error: deleteTag, Forbidden")
+		return c.NoContent(http.StatusForbidden)
+	}
+	_, err = db.Exec("DELETE FROM unit_tag WHERE tag_id = ?", id)
+	if err != nil {
+		log.Printf("Error: deleteTag, DELETE FROM unit_tag, %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	return c.NoContent(http.StatusOK)
+}
+
 //POST /unit
 func createUnit(c echo.Context) error {
 	name := c.FormValue("name")
@@ -545,16 +601,12 @@ func createUnit(c echo.Context) error {
 		return c.String(http.StatusBadRequest, "Error: Value name")
 	}
 	if len(url) > MAX_UNIT_URL_SIZE || !checkStringNull(url) {
-		log.Println("Error: Value name")
-		return c.String(http.StatusBadRequest, "Error: Value name")
+		log.Println("Error: Value url")
+		return c.String(http.StatusBadRequest, "Error: Value url")
 	}
-	user, err := getUser(uuid)
-	if err != nil {
-		log.Printf("Error: createUnit, getUser, %v", err)
-		if err.Error() == "Forbidden" {
-			return c.NoContent(http.StatusForbidden)
-		}
-		return c.String(http.StatusBadRequest, "Error: Value uuid")
+	user, ok, err := getUser(uuid, &c)
+	if !ok {
+		return err
 	}
 
 	unit_id, err := sqlRepeatInt(func(id int64) error {
@@ -599,18 +651,53 @@ func createUnit(c echo.Context) error {
 	return c.NoContent(http.StatusOK)
 }
 
+func getAllUnit(c echo.Context, user User) error {
+	units := []Unit{}
+	rows, err := db.Query("SELECT t1.id,t1.name,t1.url,tag_table.id,tag_table.name FROM "+
+		"(SELECT unit_tag.tag_id,unit_table.id,unit_table.name,unit_table.url FROM unit_tag "+
+		"LEFT JOIN unit_table ON unit_tag.unit_id = unit_table.id AND unit_table.user_id = ?) AS t1 "+
+		"LEFT JOIN tag_table ON t1.tag_id = tag_table.id",
+		user.Id)
+	if err != nil {
+		log.Printf("Error: getUnit, SELECT t1.unit_id,tag_table.id, %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+
+	for rows.Next() {
+		var t Tag
+		var id int64
+		var uname, uurl string
+		err = rows.Scan(&id, &uname, &uurl, &t.Id, &t.Name)
+		if err != nil {
+			continue
+		}
+		t.UserId = user.Id
+		flag := false
+		for i, u := range units {
+			if u.Id == id {
+				units[i].Tags = append(units[i].Tags, t)
+				flag = true
+			}
+		}
+		if !flag {
+			units = append(units, Unit{Id: id, Name: uname, Url: uurl,
+				Tags: []Tag{t}})
+		}
+	}
+
+	return c.JSON(http.StatusOK, units)
+}
+
 //GET /unit
 func getUnit(c echo.Context) error {
 	uuid := c.QueryParam("uuid")
-	tags_str := c.QueryParam("tags")
-	user, err := getUser(uuid)
-
-	if err != nil {
-		log.Printf("Error: getUnit, getUser, %v", err)
-		if err.Error() == "Forbidden" {
-			return c.NoContent(http.StatusForbidden)
-		}
-		return c.String(http.StatusBadRequest, "Error: Value uuid")
+	tags_str := strings.Trim(c.QueryParam("tags"), " ")
+	user, ok, err := getUser(uuid, &c)
+	if !ok {
+		return err
+	}
+	if tags_str == "" {
+		return getAllUnit(c, user)
 	}
 
 	tags_list := strings.Split(tags_str, ",")
@@ -625,7 +712,6 @@ func getUnit(c echo.Context) error {
 		"(SELECT unit_id, COUNT(unit_id) as cnt FROM unit_tag WHERE tag_id in (?) "+
 		"GROUP BY unit_id) AS t1 LEFT JOIN unit_table ON t1.cnt = ? AND t1.unit_id = unit_table.id AND unit_table.user_id = ?",
 		tags_str, len(tags_list), user.Id)
-
 	if err != nil {
 		log.Printf("Error: getUnit, SELECT t1.unit_id,unit_table.name, %v", err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -645,7 +731,6 @@ func getUnit(c echo.Context) error {
 	}
 	unit_id_str := string(unit_id_list[1:])
 
-	log.Println(unit_id_str)
 	rows, err = db.Query("SELECT t1.unit_id,tag_table.id,tag_table.name FROM "+
 		"(SELECT unit_id, tag_id FROM unit_tag WHERE unit_id in (?)) AS t1 "+
 		"LEFT JOIN tag_table ON t1.tag_id = tag_table.id",
@@ -672,6 +757,233 @@ func getUnit(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, units)
+}
+
+//Put /unit
+func updateUnit(c echo.Context) error {
+	id_str := c.FormValue("id")
+	name := c.FormValue("name")
+	url := c.FormValue("url")
+	tag_str := c.FormValue("tags")
+	uuid := c.FormValue("uuid")
+	if len(name) > MAX_UNIT_NAME_SIZE || !checkStringNull(name) {
+		log.Println("Error: updateUnit, Value name")
+		return c.String(http.StatusBadRequest, "Error: Value name")
+	}
+	if len(url) > MAX_UNIT_URL_SIZE || !checkStringNull(url) {
+		log.Println("Error: updateUnit, Value url")
+		return c.String(http.StatusBadRequest, "Error: Value url")
+	}
+	id, err := strconv.ParseInt(id_str, 10, 64)
+	if err != nil {
+		log.Println("Error: id, ParseInt")
+		return c.String(http.StatusBadRequest, "Error: Value id")
+	}
+	user, ok, err := getUser(uuid, &c)
+	if !ok {
+		return err
+	}
+	sets := []string{}
+	if name != "" {
+		sets = append(sets, "name='"+name+"'")
+	}
+	if url != "" {
+		sets = append(sets, "url='"+url+"'")
+	}
+	if len(sets) > 0 {
+		s, err := db.Exec("UPDATE unit_table SET "+strings.Join(sets, ",")+" WHERE id = ? AND user_id = ?",
+			id, user.Id)
+		if err != nil {
+			log.Printf("Error: updateUnit, UPDATE unit_table, %v", err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
+		r, err := s.RowsAffected()
+		if err != nil {
+			log.Printf("Error: updateUnit, UPDATE unit_table, RowsAffected, %v", err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
+		if r != 1 {
+			log.Printf("Error: updateUnit, Forbidden")
+			return c.NoContent(http.StatusForbidden)
+		}
+	} else {
+		var cnt int
+		err = db.QueryRow("SELECT COUNT(id) FROM unit_table WHERE id = ? AND user_id = ?",
+			id, user.Id).Scan(&cnt)
+		if err != nil {
+			log.Printf("Error: updateUnit, SELECT COUNT(id), %v", err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
+		if cnt != 1 {
+			log.Println("Error: updateUnit, Forbidden")
+			return c.NoContent(http.StatusForbidden)
+		}
+	}
+
+	if tag_str != "" {
+		tag_list := strings.Split(tag_str, ",")
+		insert_tag_list := []string{}
+		for _, t := range tag_list {
+			t = strings.Trim(t, " ")
+			_, err = strconv.ParseInt(t, 10, 64)
+			if err != nil {
+				log.Printf("Error: updateUnit, ParseInt, tag, %v", err)
+			}
+			insert_tag_list = append(insert_tag_list,
+				"("+strconv.FormatInt(id, 10)+","+t+")")
+		}
+
+		_, err = db.Exec("DELETE FROM unit_tag WHERE unit_id = ?", id)
+		if err != nil {
+			log.Printf("Error: updateUnit, DELETE FROM unit_tag, %v", err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
+		_, err = db.Exec("INSERT INTO unit_tag VALUES " + strings.Join(insert_tag_list, ","))
+		if err != nil {
+			log.Printf("Error: updateUnit, INSERT INTO unit_tag, %v", err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
+	}
+
+	return c.NoContent(http.StatusOK)
+}
+
+//Delete /unit/:id
+func deleteUnit(c echo.Context) error {
+	var err error
+	uuid := c.QueryParam("uuid")
+	user, ok, err := getUser(uuid, &c)
+	if !ok {
+		return err
+	}
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		return c.String(http.StatusBadRequest, "Error: Value id")
+	}
+
+	s, err := db.Exec("DELETE FROM unit_table WHERE id = ? AND user_id = ?", id, user.Id)
+	if err != nil {
+		log.Printf("Error: deleteUnit, DELETE FROM unit_table, %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	r, err := s.RowsAffected()
+	if err != nil {
+		log.Printf("Error: deleteUnit, DELETE FROM unit_table, RowsAffected, %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	if r != 1 {
+		log.Printf("Error: deleteUnit, Forbidden")
+		return c.NoContent(http.StatusForbidden)
+	}
+	_, err = db.Exec("DELETE FROM unit_tag WHERE unit_id = ?", id)
+	if err != nil {
+		log.Printf("Error: deleteUnit, DELETE FROM unit_tag, %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	return c.NoContent(http.StatusOK)
+}
+
+func getUserAPI(c echo.Context) error {
+	uuid := c.QueryParam("uuid")
+	user, ok, err := getUser(uuid, &c)
+	if !ok {
+		return err
+	}
+	return c.JSON(http.StatusOK, user)
+}
+
+func updateUser(c echo.Context) error {
+	var err error
+	uuid := c.FormValue("uuid")
+	name := c.FormValue("username")
+	pass := c.FormValue("password")
+	email := c.FormValue("email")
+	user, ok, err := getUser(uuid, &c)
+	if !ok {
+		return err
+	}
+	if len(name) > MAX_USER_NAME_SIZE || (name != "" && !checkStringRestrict(name)) {
+		return c.String(http.StatusBadRequest, "Error: Value username")
+	}
+	if len(pass) > MAX_PASSWORD_SIZE || !checkStringNull(pass) {
+		return c.String(http.StatusBadRequest, "Error: Value password")
+	}
+	if len(email) > MAX_EMAIL_SIZE || !checkStringNull(email) {
+		return c.String(http.StatusBadRequest, "Error: Value email")
+	}
+
+	if name == "" && pass == "" && email == "" {
+		return c.NoContent(http.StatusBadGateway)
+	}
+	sets := []string{}
+	sets_name := []string{}
+	if name != "" && name != user.Name {
+		sets = append(sets, "name='"+name+"'")
+		sets_name = append(sets_name, "ユーザー名")
+	}
+	if pass != "" {
+		sets = append(sets, "password='"+pass+"'")
+		sets_name = append(sets_name, "パスワード")
+	}
+	if email != "" && email != user.Email {
+		sets = append(sets, "email='"+email+"'")
+		sets = append(sets, "authorized=false")
+		sets_name = append(sets_name, "メールアドレス")
+	}
+	message := strings.Join(sets_name, "、") + "が変更されました。\n" +
+		"心当たりがない場合は開発者に連絡してください。\n"
+	if email != "" {
+		message += "メールアドレスが変更されたため、以下のリンクから認証してください。\n<url>\n"
+	} else {
+		email = user.Email
+	}
+
+	_, err = db.Exec("UPDATE user_table SET "+strings.Join(sets, ",")+" WHERE id=?", user.Id)
+	if err != nil {
+		log.Printf("Error: updateUser, UPDATE, %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+
+	err = sendAuthorizeEmail(email, "ユーザー情報変更", message, user.Uuid, user.Id)
+	if err != nil {
+		log.Printf("Error: updateUser, sendAuthorizeEmail, %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+
+	return c.NoContent(http.StatusOK)
+}
+
+//DELETE /user/:uuid
+func deleteUser(c echo.Context) error {
+	var err error
+	uuid := c.Param("uuid")
+	user, ok, err := getUser(uuid, &c)
+	if !ok {
+		return err
+	}
+
+	_, err = db.Exec("DELETE FROM unit_tag WHERE unit_id in (SELECT id FROM unit_table WHERE user_id = ?)", user.Id)
+	if err != nil {
+		log.Printf("Error: deleteUser, DELETE FROM unit_tag, %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	_, err = db.Exec("DELETE FROM unit_table WHERE user_id = ?", user.Id)
+	if err != nil {
+		log.Printf("Error: deleteUser, DELETE FROM unit_table, %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	_, err = db.Exec("DELETE FROM tag_table WHERE user_id = ?", user.Id)
+	if err != nil {
+		log.Printf("Error: deleteUser, DELETE FROM tag_table, %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	_, err = db.Exec("DELETE FROM user_table WHERE id=?", user.Id)
+	if err != nil {
+		log.Printf("Error: deleteUser, DELETE FROM user_table, %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+
+	return nil
 }
 
 func testPage(c echo.Context) error {
@@ -713,9 +1025,15 @@ func main() {
 
 	e.GET("/tag", getTag)
 	e.POST("/tag", createTag)
-	e.POST("/tag/:id", changeTag)
+	e.PUT("/tag", updateTag)
+	e.DELETE("/tag/:id", deleteTag)
 	e.GET("/unit", getUnit)
 	e.POST("/unit", createUnit)
+	e.PUT("/unit", updateUnit)
+	e.DELETE("/unit/:id", deleteUnit)
+	e.GET("/user", getUserAPI)
+	e.PUT("/user", updateUser)
+	e.DELETE("/user/:uuid", deleteUser)
 
 	e.Logger.Fatal(e.Start(":" + port))
 }
