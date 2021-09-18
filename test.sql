@@ -1,6 +1,6 @@
-use tagtagyeah; -- local
+-- use tagtagyeah; -- local
 -- use heroku_acb493180552729; -- heroku ClearDB
--- use eij8pzwnprvffh1t; -- heroku JawsDB
+use eij8pzwnprvffh1t; -- heroku JawsDB
 drop table tag_table;
 create table tag_table(
 	id int not null primary key,
@@ -42,7 +42,7 @@ create table unit_tag(
 insert into tag_table (id,user_id,name) values
 (1,0,"tag1"),(2,0,"tag2"),(3,0,"tag3"),(4,0,"tag4"),(5,0,"tag5");
 insert into user_table (id,uuid,name,password,email,expire_uuid_at) values
-(0,"12345678901234567890","user0","pass","email",DATE_ADD(NOW(), INTERVAL 1 DAY));
+(0,"12345678901234567890","user0","pass","email",DATE_ADD(NOW(), INTERVAL 1 YEAR));
 insert into unit_table (id,user_id,name,url) values
 (1,0,"testname1",""),(2,0,"testname2","testurl2"),(3,0,"","testurl3");
 insert into unit_tag (unit_id,tag_id) values

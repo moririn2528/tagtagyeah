@@ -463,7 +463,7 @@ func createTag(c echo.Context) error {
 		log.Println("database null")
 	}
 
-	_, err = sqlRepeatInt(func(x int64) error {
+	tag.Id, err = sqlRepeatInt(func(x int64) error {
 		_, err = db.Exec("INSERT INTO tag_table (id,user_id,name) SELECT ?,?,? "+
 			"WHERE NOT EXISTS(SELECT id FROM tag_table WHERE user_id = ? AND name = ?)",
 			x, tag.UserId, tag.Name, tag.UserId, tag.Name)
@@ -475,7 +475,7 @@ func createTag(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	return c.NoContent(http.StatusOK)
+	return c.JSON(http.StatusOK, map[string]int64{"id": tag.Id})
 }
 
 //PUT /tag
@@ -512,7 +512,7 @@ func updateTag(c echo.Context) error {
 	return c.NoContent(http.StatusOK)
 }
 
-//Get /tag
+//GET /tag
 func getTag(c echo.Context) error {
 	var err error
 	uuid := c.QueryParam("uuid")
@@ -554,7 +554,7 @@ func getTag(c echo.Context) error {
 	return c.JSON(http.StatusOK, res)
 }
 
-//Delete /tag:id
+//DELETE /tag:id
 func deleteTag(c echo.Context) error {
 	var err error
 	uuid := c.QueryParam("uuid")
@@ -648,7 +648,7 @@ func createUnit(c echo.Context) error {
 		}
 	}
 
-	return c.NoContent(http.StatusOK)
+	return c.JSON(http.StatusOK, map[string]int64{"id": unit_id})
 }
 
 func getAllUnit(c echo.Context, user User) error {
@@ -759,7 +759,7 @@ func getUnit(c echo.Context) error {
 	return c.JSON(http.StatusOK, units)
 }
 
-//Put /unit
+//PUT /unit
 func updateUnit(c echo.Context) error {
 	id_str := c.FormValue("id")
 	name := c.FormValue("name")
@@ -830,7 +830,7 @@ func updateUnit(c echo.Context) error {
 				log.Printf("Error: updateUnit, ParseInt, tag, %v", err)
 			}
 			insert_tag_list = append(insert_tag_list,
-				"("+strconv.FormatInt(id, 10)+","+t+")")
+				"("+id_str+","+t+")")
 		}
 
 		_, err = db.Exec("DELETE FROM unit_tag WHERE unit_id = ?", id)
@@ -838,7 +838,7 @@ func updateUnit(c echo.Context) error {
 			log.Printf("Error: updateUnit, DELETE FROM unit_tag, %v", err)
 			return c.NoContent(http.StatusInternalServerError)
 		}
-		_, err = db.Exec("INSERT INTO unit_tag VALUES " + strings.Join(insert_tag_list, ","))
+		_, err = db.Exec("INSERT INTO unit_tag(unit_id, tag_id) VALUES " + strings.Join(insert_tag_list, ","))
 		if err != nil {
 			log.Printf("Error: updateUnit, INSERT INTO unit_tag, %v", err)
 			return c.NoContent(http.StatusInternalServerError)
@@ -848,7 +848,7 @@ func updateUnit(c echo.Context) error {
 	return c.NoContent(http.StatusOK)
 }
 
-//Delete /unit/:id
+//DELETE /unit/:id
 func deleteUnit(c echo.Context) error {
 	var err error
 	uuid := c.QueryParam("uuid")

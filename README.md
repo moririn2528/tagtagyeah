@@ -47,14 +47,7 @@ JSON 型
 user_id, name が同じ場合、追加で登録されないが成功となる。
 
 ### パラメータ
-- user_id: ユーザー ID、int64 型
-- name: タグ名、50 バイト以下の文字列
-
-## POST /tag/:id
-### 説明
-タグ名の変更
-
-### パラメータ
+- uuid
 - name: タグ名、50 バイト以下の文字列
 
 ## GET /tag
@@ -62,7 +55,7 @@ user_id, name が同じ場合、追加で登録されないが成功となる。
 タグの検索、一覧取得
 
 ### パラメータ
-- user_id: ユーザー ID、int64 型
+- uuid
 - search_phrase: 検索文字列、prefix が完全一致となるタグを返す
 
 ### 返り値
@@ -76,6 +69,10 @@ user_id, name が同じ場合、追加で登録されないが成功となる。
 - uuid
 - id: タグ id
 - name: タグ名
+
+### 返り値
+JSON 
+- id: タグ id、数値
 
 ## DELETE /tag/:id
 ### 説明
@@ -106,6 +103,10 @@ Unit を作成、タグ付け
 - name: 名前、省略可
 - url : URL、省略可
 name, url のうち少なくとも 1 つは付けること
+
+### 返り値
+JSON 
+- id: Unit id、数値
 
 ## PUT /unit
 ### 説明
@@ -184,6 +185,9 @@ username, password, email のうち一つは使うこと
 - DELETE: (Param)
 
 # TODO
+## POST5
+- id を返してほしい
+
 ## POST /tag
 - user_id, name が同じ場合、200 以外を返したい。
 
