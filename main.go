@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"log"
 	"math"
 	mrand "math/rand"
@@ -536,7 +535,6 @@ func updateTag(c echo.Context) error {
 // }
 
 func getTag(c echo.Context) error {
-	tm := time.Now()
 	var err error
 	uuid := c.QueryParam("uuid")
 	user, ok, err := getUser(uuid, &c)
@@ -562,8 +560,6 @@ func getTag(c echo.Context) error {
 	for i := 0; i+1 < len(phrase); i++ {
 		phrase_map[phrase[i:i+2]]++
 	}
-	fmt.Printf("init time: %v ms\n", time.Since(tm).Milliseconds())
-	tm = time.Now()
 
 	rows, err := db.Query("SELECT id, user_id, name from tag_table WHERE user_id = ?", userId)
 	if err != nil {
@@ -571,9 +567,6 @@ func getTag(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 	defer rows.Close()
-
-	fmt.Printf("sql time: %v ms\n", time.Since(tm).Milliseconds())
-	tm = time.Now()
 
 	var res []*Tag
 	var index = -1
@@ -635,9 +628,6 @@ func getTag(c echo.Context) error {
 			break
 		}
 	}
-
-	fmt.Printf("algo time: %v ms\n", time.Since(tm).Milliseconds())
-	tm = time.Now()
 
 	return c.JSON(http.StatusOK, ans)
 }
