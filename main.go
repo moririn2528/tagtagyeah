@@ -4,12 +4,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log"
 	"math"
 	mrand "math/rand"
 	"net/http"
 	"net/smtp"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -21,20 +23,20 @@ import (
 )
 
 type Unit struct {
-	Id   int64  `json:"id"`
+	Id   int    `json:"id"`
 	Name string `json:"name"`
 	Url  string `json:"url"`
 	Tags []Tag  `json:"tags"`
 }
 
 type Tag struct {
-	Id     int64  `json:"id"`
-	UserId int64  `json:"user_id"`
-	Name   string `json:"mame"`
+	Id     int    `json:"id"`
+	UserId int    `json:"user_id"`
+	Name   string `json:"name"`
 }
 
 type User struct {
-	Id           int64     `db:"id" json:"id"`
+	Id           int       `db:"id" json:"id"`
 	Uuid         string    `db:"uuid" json:"uuid"`
 	Name         string    `db:"name" json:"name"`
 	Email        string    `db:"email" json:"email"`
@@ -57,13 +59,14 @@ const (
 	MAX_SQL_EXEC_SIZE    = 1500
 	EXPIRE_UUID_LIMIT    = 1 //days
 	SENDING_MAIL_LIMIT   = 10
+	LIMIT_OUTPUT_TAG     = 100
 )
 
 var (
 	db                    *sqlx.DB
 	working_directory     string
-	sending_mail_times    map[int64]int64 = make(map[int64]int64)
-	last_sending_mail_day time.Time       = time.Now()
+	sending_mail_times    map[int]int = make(map[int]int)
+	last_sending_mail_day time.Time   = time.Now()
 )
 
 func checkStringNull(str string) bool {
@@ -114,10 +117,10 @@ func checkUuid(u User) error {
 	return nil
 }
 
-func sqlRepeatInt(fn func(int64) error) (int64, error) {
+func sqlRepeatInt(fn func(int) error) (int, error) {
 	var err error
 	for i := 0; i < 2; i++ {
-		n := mrand.Int63n(math.MaxInt32)
+		n := mrand.Intn(math.MaxInt32)
 		err = fn(n)
 		if err == nil {
 			return n, nil
@@ -138,10 +141,10 @@ func sqlRepeatString(fn func(string) error, length int) (string, error) {
 	log.Println("Warning: sqlRepeatString, SQL repeat finished")
 	return "", err
 }
-func sqlRepeatIntString(fn func(int64, string) error, length int) (int64, string, error) {
+func sqlRepeatIntString(fn func(int, string) error, length int) (int, string, error) {
 	var err error
 	for i := 0; i < 2; i++ {
-		n := mrand.Int63n(math.MaxInt32)
+		n := mrand.Intn(math.MaxInt32)
 		str := getRandString(length)
 		err = fn(n, str)
 		if err == nil {
@@ -214,11 +217,11 @@ func sendEmail(to, subject, message string) error {
 	)
 }
 
-func sendAuthorizeEmail(to, subject, message, uuid string, id int64) error {
+func sendAuthorizeEmail(to, subject, message, uuid string, id int) error {
 	tm := time.Now()
 
 	if tm.Day() != last_sending_mail_day.Day() || tm.Month() != last_sending_mail_day.Month() || tm.Year() != last_sending_mail_day.Year() {
-		sending_mail_times = make(map[int64]int64)
+		sending_mail_times = make(map[int]int)
 	}
 	_, ok := sending_mail_times[id]
 	if !ok {
@@ -289,7 +292,7 @@ func register(c echo.Context) error {
 		}
 	}
 
-	id, uuid, err := sqlRepeatIntString(func(id int64, str string) error {
+	id, uuid, err := sqlRepeatIntString(func(id int, str string) error {
 		_, err := db.Exec("INSERT INTO user_table (id, uuid, name, password, email, expire_uuid_at) VALUES (?,?,?,?,?,DATE_ADD(NOW(), INTERVAL ? DAY))",
 			id, str, username, password_hash, email, EXPIRE_UUID_LIMIT)
 		return err
@@ -463,7 +466,7 @@ func createTag(c echo.Context) error {
 		log.Println("database null")
 	}
 
-	tag.Id, err = sqlRepeatInt(func(x int64) error {
+	tag.Id, err = sqlRepeatInt(func(x int) error {
 		_, err = db.Exec("INSERT INTO tag_table (id,user_id,name) SELECT ?,?,? "+
 			"WHERE NOT EXISTS(SELECT id FROM tag_table WHERE user_id = ? AND name = ?)",
 			x, tag.UserId, tag.Name, tag.UserId, tag.Name)
@@ -475,7 +478,7 @@ func createTag(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	return c.JSON(http.StatusOK, map[string]int64{"id": tag.Id})
+	return c.JSON(http.StatusOK, map[string]int{"id": tag.Id})
 }
 
 //PUT /tag
@@ -512,8 +515,28 @@ func updateTag(c echo.Context) error {
 	return c.NoContent(http.StatusOK)
 }
 
-//GET /tag
+// func similarity_string(phrase, sa string) int {
+// 	const N = 2 // n gram
+// 	var ra = []rune(phrase)
+// 	var rb = []rune(sa)
+// 	var s = 0
+// 	for i := 0; i+N <= len(ra); i++ {
+// 		var flag = false
+// 		for j := 0; j+N <= len(rb); j++ {
+// 			if string(ra[i:i+N]) == string(rb[j:j+N]) {
+// 				flag = true
+// 				break
+// 			}
+// 		}
+// 		if flag {
+// 			s++
+// 		}
+// 	}
+// 	return s
+// }
+
 func getTag(c echo.Context) error {
+	tm := time.Now()
 	var err error
 	uuid := c.QueryParam("uuid")
 	user, ok, err := getUser(uuid, &c)
@@ -522,6 +545,25 @@ func getTag(c echo.Context) error {
 	}
 	userId := user.Id
 	phrase := c.QueryParam("search_phrase")
+	limit_str := c.QueryParam("limit")
+	var limit int
+	if limit_str == "" {
+		limit = LIMIT_OUTPUT_TAG + 1
+	} else {
+		limit, err = strconv.Atoi(limit_str)
+		if err != nil {
+			return c.String(http.StatusBadRequest, "Error: Value limit")
+		}
+		if LIMIT_OUTPUT_TAG < limit {
+			limit = LIMIT_OUTPUT_TAG
+		}
+	}
+	phrase_map := map[string]int{}
+	for i := 0; i+1 < len(phrase); i++ {
+		phrase_map[phrase[i:i+2]]++
+	}
+	fmt.Printf("init time: %v ms\n", time.Since(tm).Milliseconds())
+	tm = time.Now()
 
 	rows, err := db.Query("SELECT id, user_id, name from tag_table WHERE user_id = ?", userId)
 	if err != nil {
@@ -530,28 +572,74 @@ func getTag(c echo.Context) error {
 	}
 	defer rows.Close()
 
+	fmt.Printf("sql time: %v ms\n", time.Since(tm).Milliseconds())
+	tm = time.Now()
+
 	var res []*Tag
+	var index = -1
+
+	tag_ids := map[int][]int{}
+	sim_list := []int{}
 
 	for rows.Next() {
-		var id int64
+		index = index + 1
+		var id int
 		var name string
-		rows.Scan(&id, &userId, &name)
-		if strings.HasPrefix(name, phrase) {
-			tag := Tag{
-				Id:     id,
-				UserId: userId,
-				Name:   name,
-			}
-			res = append(res, &tag)
+		err = rows.Scan(&id, &userId, &name)
+		if err != nil {
+			continue
 		}
+		i := len(res)
+		tag := Tag{
+			Id:     id,
+			UserId: userId,
+			Name:   name,
+		}
+		res = append(res, &tag)
+		sim := 0
+		for j := 0; j+1 < len(name); j++ {
+			v, ok := phrase_map[name[j:j+2]]
+			if ok {
+				sim += v
+			}
+		}
+		_, ok := tag_ids[sim]
+		if !ok {
+			sim_list = append(sim_list, sim)
+		}
+		tag_ids[sim] = append(tag_ids[sim], i)
 	}
+
 	err = rows.Err()
 	if err != nil {
 		log.Println(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	return c.JSON(http.StatusOK, res)
+	if phrase == "" && LIMIT_OUTPUT_TAG < limit {
+		return c.JSON(http.StatusOK, res)
+	}
+	if LIMIT_OUTPUT_TAG < limit || limit <= 0 {
+		limit = LIMIT_OUTPUT_TAG
+	}
+	sort.Slice(sim_list, func(i, j int) bool { return sim_list[i] > sim_list[j] })
+	var ans []*Tag
+	for _, sim := range sim_list {
+		for _, v := range tag_ids[sim] {
+			ans = append(ans, res[v])
+			if limit <= len(ans) {
+				break
+			}
+		}
+		if limit <= len(ans) {
+			break
+		}
+	}
+
+	fmt.Printf("algo time: %v ms\n", time.Since(tm).Milliseconds())
+	tm = time.Now()
+
+	return c.JSON(http.StatusOK, ans)
 }
 
 //DELETE /tag:id
@@ -609,7 +697,7 @@ func createUnit(c echo.Context) error {
 		return err
 	}
 
-	unit_id, err := sqlRepeatInt(func(id int64) error {
+	unit_id, err := sqlRepeatInt(func(id int) error {
 		_, err := db.Exec("INSERT INTO unit_table(id, user_id, name, url) VALUES (?,?,?,?)",
 			id, user.Id, name, url)
 		return err
@@ -637,7 +725,7 @@ func createUnit(c echo.Context) error {
 		if i > 0 {
 			exec_byte = append(exec_byte, ", "...)
 		}
-		exec_byte = append(exec_byte, ("(" + strconv.FormatInt(unit_id, 10) + "," + strconv.FormatInt(tag, 10) + ")")...)
+		exec_byte = append(exec_byte, ("(" + strconv.Itoa(unit_id) + "," + strconv.FormatInt(tag, 10) + ")")...)
 	}
 	if len(tag_str_list) > 0 {
 		_, err = db.Exec(string(exec_byte))
@@ -648,7 +736,7 @@ func createUnit(c echo.Context) error {
 		}
 	}
 
-	return c.JSON(http.StatusOK, map[string]int64{"id": unit_id})
+	return c.JSON(http.StatusOK, map[string]int{"id": unit_id})
 }
 
 func getAllUnit(c echo.Context, user User) error {
@@ -665,7 +753,7 @@ func getAllUnit(c echo.Context, user User) error {
 
 	for rows.Next() {
 		var t Tag
-		var id int64
+		var id int
 		var uname, uurl string
 		err = rows.Scan(&id, &uname, &uurl, &t.Id, &t.Name)
 		if err != nil {
@@ -727,7 +815,7 @@ func getUnit(c echo.Context) error {
 		}
 		units = append(units, u)
 		unit_id_list = append(unit_id_list, ","...)
-		unit_id_list = append(unit_id_list, strconv.FormatInt(u.Id, 10)...)
+		unit_id_list = append(unit_id_list, strconv.Itoa(u.Id)...)
 	}
 	unit_id_str := string(unit_id_list[1:])
 
@@ -743,7 +831,7 @@ func getUnit(c echo.Context) error {
 
 	for rows.Next() {
 		var t Tag
-		var id int64
+		var id int
 		err = rows.Scan(&id, &t.Id, &t.Name)
 		if err != nil {
 			continue
@@ -991,6 +1079,44 @@ func testPage(c echo.Context) error {
 	return c.String(http.StatusOK, "Hello, World!")
 }
 
+func testCreateTag(c echo.Context) error {
+	const N = 10000
+	const M = 10
+	uuid := c.FormValue("uuid")
+	user, ok, err := getUser(uuid, &c)
+	if !ok {
+		return err
+	}
+	userId := user.Id
+
+	if db == nil {
+		log.Println("database null")
+	}
+
+	for j := 0; j < M; j++ {
+		_, err = sqlRepeatInt(func(x int) error {
+			if math.MaxInt32-N < x {
+				return errors.New("x range error")
+			}
+			cmd := "INSERT INTO tag_table (id,user_id,name) VALUES "
+			for i := 0; i < N; i++ {
+				if i > 0 {
+					cmd += ","
+				}
+				cmd += "(" + strconv.Itoa(x+i) + "," + strconv.Itoa(userId) + ",'" + getRandString(20) + "')"
+			}
+			_, err = db.Exec(cmd)
+			return err
+		})
+		if err != nil {
+			log.Printf("Error: createTag, INSERT, %v", err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
+	}
+
+	return c.String(http.StatusOK, "Create OK!")
+}
+
 func main() {
 	var err error
 	e := echo.New()
@@ -1034,6 +1160,9 @@ func main() {
 	e.GET("/user", getUserAPI)
 	e.PUT("/user", updateUser)
 	e.DELETE("/user/:uuid", deleteUser)
+
+	// beta version
+	e.POST("/beta/tag", testCreateTag)
 
 	e.Logger.Fatal(e.Start(":" + port))
 }
