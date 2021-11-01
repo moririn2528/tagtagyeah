@@ -16,6 +16,9 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/ssm"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo/v4"
@@ -66,6 +69,7 @@ var (
 	working_directory     string
 	sending_mail_times    map[int]int = make(map[int]int)
 	last_sending_mail_day time.Time   = time.Now()
+	cloud                 string
 )
 
 func checkStringNull(str string) bool {
@@ -182,14 +186,46 @@ func getUser(uuid string, c *echo.Context) (User, bool, error) {
 	return users[0], true, nil
 }
 
+func get_aws_parameger(param string) (string, error) {
+	sess, err := session.NewSessionWithOptions(session.Options{
+		Config: aws.Config{
+			Region: aws.String("ap-northeast-3"),
+		},
+		Profile: "default",
+	})
+	if err != nil {
+		log.Printf("Error: get_aws_parameger, NewSessionWithOptions, %v", err)
+		return "", err
+	}
+	svc := ssm.New(sess)
+
+	res, err := svc.GetParameter(&ssm.GetParameterInput{
+		Name:           aws.String(param),
+		WithDecryption: aws.Bool(true),
+	})
+	if err != nil {
+		log.Printf("Error: get_aws_parameger, GetParameter, %v", err)
+		return "", err
+	}
+
+	return *(res.Parameter.Value), nil
+}
+
 func sendEmail(to, subject, message string) error {
 	log.Println("sending mail ...")
 	defer log.Println("sending mail finished")
 
 	var password string
 	var err error
-	password = os.Getenv("gmailpassword")
-	if password == "" {
+	if cloud == "heroku" {
+		password = os.Getenv("gmailpassword")
+	} else if cloud == "AWS" {
+		password, err = get_aws_parameger("/app2/dev/gmailpassword")
+		if err != nil {
+			log.Printf("Error: sendMail, get_aws_parameger, %v", err)
+			return err
+		}
+	} else {
 		err = db.QueryRow("SELECT gmailpassword FROM secret_table").Scan(&password)
 		if err != nil {
 			log.Printf("Error: sendMail, rows.Scan, %v", err)
@@ -1112,16 +1148,22 @@ func main() {
 	e := echo.New()
 	mrand.Seed(time.Now().UnixNano())
 
-	var dataSource string
-	if os.Getenv("JAWSDB_GOLD_URL") != "" {
+	var dataSource, port string
+	cloud = os.Getenv("CLOUD")
+	if cloud == "heroku" {
+		log.Println("Execute in heroku")
 		dataSource = "sl18tzgbp14cglnu:cc3cl5f37fcfrd21@tcp(s465z7sj4pwhp7fn.cbetxkdyhwsb.us-east-1.rds.amazonaws.com:3306)/eij8pzwnprvffh1t?parseTime=true&loc=Asia%2FTokyo"
 		working_directory = "https://tagtagyeah.herokuapp.com"
+		port = os.Getenv("PORT")
+	} else if cloud == "AWS" {
+		log.Println("Execute in AWS")
+		dataSource = "jH69d8bS:bhWReNAgKxRKuVhB8EhS@tcp(127.0.0.1:3306)/tagtagyeah?parseTime=true&loc=Asia%2FTokyo"
+		working_directory = "http://15.152.125.29"
+		port = "80"
 	} else {
+		log.Println("Execute in local")
 		dataSource = "user483:Te9SLqyciALe@tcp(127.0.0.1:3306)/tagtagyeah?parseTime=true&loc=Asia%2FTokyo"
 		working_directory = "localhost:1213"
-	}
-	port := os.Getenv("PORT")
-	if port == "" {
 		port = "1213"
 	}
 

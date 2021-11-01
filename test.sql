@@ -1,7 +1,7 @@
 -- service -> start
--- use tagtagyeah; -- local
+use tagtagyeah; -- local
 -- use heroku_acb493180552729; -- heroku ClearDB
-use eij8pzwnprvffh1t; -- heroku JawsDB
+-- use eij8pzwnprvffh1t; -- heroku JawsDB
 drop table tag_table;
 create table tag_table(
 	id int not null primary key,

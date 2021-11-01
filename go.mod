@@ -3,6 +3,7 @@ module tagtagyeah
 go 1.16
 
 require (
+	github.com/aws/aws-sdk-go v1.41.14
 	github.com/go-sql-driver/mysql v1.6.0
 	github.com/jmoiron/sqlx v1.3.4
 	github.com/labstack/echo/v4 v4.5.0
